@@ -31,81 +31,57 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size, n_embed, block_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(n_embed, head_size, block_size) for _ in range(num_heads)])
+        self.projection = nn.Linear(n_embed, n_embed)
         
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
-        
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        return self.projection(out)
+
 class FeedForward(nn.Module):
     """ a simple linear + relu"""
     def __init__(self, n_embed):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embed, n_embed),
+            nn.Linear(n_embed, 4 * n_embed),
             nn.ReLU(),
-            nn.Linear(n_embed, n_embed)
+            nn.Linear(4 * n_embed, n_embed)
         )
         
     def forward(self, x):
-        return self.net(x)        
-
-class SingleHeadTransformer(nn.Module):
-    """ Simple model that generate next token based on probability from embedding table with"""
-    def __init__(self, vocab_size, n_embed, head_size, block_size, device='cpu'):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.n_embed = n_embed
-        self.head_size = head_size
-        self.block_size = block_size
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
-        self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.sa_head = Head(n_embed, head_size, block_size)
-        self.lm_head = nn.Linear(n_embed, vocab_size)
-        self.device = device
-        
-    def forward(self, idx, targets=None):
-        B, T = idx.shape
-        # targets is (B, T)
-        # (B, T, C)
-        tok_embed = self.token_embedding_table(idx)
-        pos_embed = self.position_embedding_table(torch.arange(T, device=self.device))
-        x = tok_embed + pos_embed
-        x = self.sa_head(x)
-        logits = self.lm_head(x)
-        if targets is None:
-            loss = None
-        else:
-            B, T, C = logits.shape
-            logits_reshaped = logits.view(B * T, C)
-            targets = targets.view(-1)
-            loss =  F.cross_entropy(logits_reshaped, targets)
-        return logits, loss
-
-    def generate(self, idx, max_new_tokens):
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.block_size:]
-            logits, _ = self(idx_cond)
-            # Get last logits
-            next_token_logits = logits[:, -1, :]
-            # Softmax to get probs
-            probs = F.softmax(next_token_logits, dim=1)
-            # Get next id based on the probs
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
-        return idx
-
-
-class MultiHeadsTransformer(nn.Module):
-    """ Simple model that generate next token based on probability from embedding table with"""
-    def __init__(self, vocab_size, n_embed, block_size, n_heads, device='cpu'):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.n_embed = n_embed
-        self.block_size = block_size
-        self.device = device
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
-        self.position_embedding_table = nn.Embedding(block_size, n_embed)
-        self.sa_heads = MultiHeadAttention(n_heads, n_embed // n_heads, n_embed, block_size)
+        return self.net(x)
+    
+class Block(nn.Module):
+    """ Transformer Block: Communication + Computation"""
+    
+    def __init__(self, n_embed, n_head, block_size):
+        super().__init__() 
+        head_size = n_embed // n_head
+        self.sa = MultiHeadAttention(n_head, head_size, n_embed, block_size)    
         self.ffwd = FeedForward(n_embed)
+        self.ln1 = nn.LayerNorm(n_embed)
+        self.ln2 = nn.LayerNorm(n_embed)
+        
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x 
+    
+class NanoTransformer(nn.Module):
+    """ Simple model that generate next token based on probability from embedding table with"""
+    def __init__(self, vocab_size, n_embed, block_size, n_head, device='cpu'):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embed = n_embed
+        self.block_size = block_size
+        self.device = device
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(block_size, n_embed)
+        self.blocks = nn.Sequential(
+            Block(n_embed, n_head, block_size),
+            Block(n_embed, n_head, block_size),
+            Block(n_embed, n_head, block_size),
+            nn.LayerNorm(n_embed)
+        )
         self.lm_head = nn.Linear(n_embed, vocab_size)
         
         
@@ -116,8 +92,7 @@ class MultiHeadsTransformer(nn.Module):
         tok_embed = self.token_embedding_table(idx)
         pos_embed = self.position_embedding_table(torch.arange(T, device=self.device))
         x = tok_embed + pos_embed
-        x = self.sa_heads(x)
-        x = self.ffwd(x)
+        x = self.blocks(x)
         logits = self.lm_head(x)
         if targets is None:
             loss = None
@@ -172,7 +147,7 @@ def train_model(raw_data):
     lr = 1e-3
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on {device}")
-    model = MultiHeadsTransformer(vocab_size, n_embed, block_size, n_heads, device)
+    model = NanoTransformer(vocab_size, n_embed, block_size, n_heads, device)
     model = model.to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
