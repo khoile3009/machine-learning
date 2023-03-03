@@ -148,7 +148,7 @@ def train_model(raw_data):
     validation_data = data[n:]
     
     eval_iters = 200
-    max_iters = 10000
+    max_iters = 5000
     eval_interval = 500
     n_embed = 32
     block_size = 8
